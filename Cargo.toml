@@ -1,0 +1,18 @@
+[package]
+name = "anthropic-proxy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+wreq = { version = "0.16.1", features = ["json", "stream", "webpki-roots", "tokio-rt", "charset", "brotli", "gzip", "deflate"] }
+wreq-util = "0.2"
+serde_json = "1"
+futures-util = "0.3"
+rand = "0.10"
+base64 = "0.23"
+sha2 = "0.11"
+async-stream = "0.3"
+directories = "6"
