@@ -70,9 +70,8 @@ fn read_request(sock: &mut std::net::TcpStream) -> (String, Vec<String>, Value) 
             break;
         }
         buf.extend_from_slice(&tmp[..n]);
-        let s = String::from_utf8_lossy(&buf).to_string();
-        let Some(i) = s.find("\r\n\r\n") else { continue };
-        let head = &s[..i];
+        let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { continue };
+        let head = String::from_utf8_lossy(&buf[..i]).to_string();
         let content_length = header(
             &head.lines().map(str::to_string).collect::<Vec<_>>(),
             "content-length",
@@ -682,4 +681,14 @@ fn thinking_is_left_off_for_models_without_adaptive_support() {
     assert_eq!(status, 200, "body={}", body);
     assert_eq!(cap.body["max_tokens"], json!(8000));
     assert!(cap.body.get("thinking").is_none(), "{:?}", cap.body["thinking"]);
+}
+
+#[test]
+fn bodies_over_axum_default_limit_are_accepted() {
+    let h = harness("bigbody", "json", false);
+    let big = "x".repeat(3 * 1024 * 1024);
+    let (status, body) = post(&h.proxy, &json!({"model":"m","messages":[{"role":"user","content":big}]}));
+    let cap = wait(&h);
+    assert_eq!(status, 200, "body={}", &body[..body.len().min(200)]);
+    assert_eq!(cap.body["messages"][0]["content"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap().len(), big.len());
 }

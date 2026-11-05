@@ -452,7 +452,7 @@ mod tests {
                 {"role": "user", "content": "hi"}
             ]
         });
-        let out = translate::openai_to_claude(&req).unwrap();
+        let out = translate::openai_to_claude(req).unwrap();
         assert_eq!(out["system"], json!("be terse"));
         assert_eq!(out["messages"].as_array().unwrap().len(), 1);
         assert_eq!(out["messages"][0]["role"], json!("user"));
@@ -470,7 +470,7 @@ mod tests {
                 {"role": "user", "content": "three"}
             ]
         });
-        let out = translate::openai_to_claude(&req).unwrap();
+        let out = translate::openai_to_claude(req).unwrap();
         let msgs = out["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 3);
         assert!(msgs[0]["content"][0].get("cache_control").is_none());
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn a_single_turn_gets_no_history_breakpoint() {
         let req = json!({"model": "m", "messages": [{"role": "user", "content": "only"}]});
-        let out = translate::openai_to_claude(&req).unwrap();
+        let out = translate::openai_to_claude(req).unwrap();
         let msgs = out["messages"].as_array().unwrap();
         assert!(msgs[0]["content"][0].get("cache_control").is_none());
     }
@@ -493,17 +493,17 @@ mod tests {
                 "model": name,
                 "messages": [{"role": "user", "content": "x"}]
             });
-            assert_eq!(translate::openai_to_claude(&req).unwrap()["model"], json!(name));
+            assert_eq!(translate::openai_to_claude(req).unwrap()["model"], json!(name));
         }
     }
 
     #[test]
     fn missing_or_blank_model_is_rejected() {
         let msgs = json!([{"role": "user", "content": "x"}]);
-        assert!(translate::openai_to_claude(&json!({"messages": msgs})).is_err());
-        assert!(translate::openai_to_claude(&json!({"model": "", "messages": msgs})).is_err());
-        assert!(translate::openai_to_claude(&json!({"model": "   ", "messages": msgs})).is_err());
-        assert!(translate::openai_to_claude(&json!({"model": 7, "messages": msgs})).is_err());
+        assert!(translate::openai_to_claude(json!({"messages": msgs})).is_err());
+        assert!(translate::openai_to_claude(json!({"model": "", "messages": msgs})).is_err());
+        assert!(translate::openai_to_claude(json!({"model": "   ", "messages": msgs})).is_err());
+        assert!(translate::openai_to_claude(json!({"model": 7, "messages": msgs})).is_err());
     }
 
     #[test]
@@ -513,7 +513,7 @@ mod tests {
             "max_tokens": 100,
             "messages": [{"role": "user", "content": "x"}]
         });
-        assert_eq!(translate::openai_to_claude(&req).unwrap()["max_tokens"], json!(100));
+        assert_eq!(translate::openai_to_claude(req).unwrap()["max_tokens"], json!(100));
     }
 
     #[test]
@@ -523,7 +523,7 @@ mod tests {
             "max_completion_tokens": 200,
             "messages": [{"role": "user", "content": "x"}]
         });
-        assert_eq!(translate::openai_to_claude(&req).unwrap()["max_tokens"], json!(200));
+        assert_eq!(translate::openai_to_claude(req).unwrap()["max_tokens"], json!(200));
 
         let both = json!({
             "model": "m",
@@ -531,7 +531,7 @@ mod tests {
             "max_completion_tokens": 200,
             "messages": [{"role": "user", "content": "x"}]
         });
-        assert_eq!(translate::openai_to_claude(&both).unwrap()["max_tokens"], json!(200));
+        assert_eq!(translate::openai_to_claude(both).unwrap()["max_tokens"], json!(200));
     }
 
     #[test]
@@ -543,7 +543,7 @@ mod tests {
                 {"role": "user", "content": "b"}
             ]
         });
-        let out = translate::openai_to_claude(&req).unwrap();
+        let out = translate::openai_to_claude(req).unwrap();
         assert_eq!(out["messages"].as_array().unwrap().len(), 1);
         assert_eq!(out["messages"][0]["content"].as_array().unwrap().len(), 2);
     }
@@ -561,7 +561,7 @@ mod tests {
                 {"role": "tool", "tool_call_id": "call_1", "content": "42"}
             ]
         });
-        let out = translate::openai_to_claude(&req).unwrap();
+        let out = translate::openai_to_claude(req).unwrap();
         let msgs = out["messages"].as_array().unwrap();
         assert_eq!(msgs[1]["content"][0]["type"], json!("tool_use"));
         assert_eq!(msgs[1]["content"][0]["input"], json!({"q": 1}));
@@ -581,7 +581,7 @@ mod tests {
             }}],
             "messages": [{"role": "user", "content": "x"}]
         });
-        let out = translate::openai_to_claude(&req).unwrap();
+        let out = translate::openai_to_claude(req).unwrap();
         assert_eq!(out["tools"][0]["name"], json!("f"));
         assert_eq!(out["tools"][0]["input_schema"]["properties"]["a"]["type"], json!("string"));
         assert_eq!(out["tool_choice"], json!({"type": "any"}));
@@ -624,7 +624,7 @@ mod tests {
                 {"role": "tool", "tool_call_id": "c1", "content": "ok"}
             ]
         });
-        let out = translate::openai_to_claude(&req).unwrap();
+        let out = translate::openai_to_claude(req).unwrap();
         assert_eq!(out["tools"][0]["name"], json!("mcp_Notion_search"));
         assert_eq!(out["tools"][1]["name"], json!("bash"));
         assert_eq!(out["tool_choice"]["name"], json!("mcp_Notion_search"));
@@ -662,7 +662,7 @@ mod tests {
             "model": "m", "tool_choice": "none",
             "messages": [{"role": "user", "content": "x"}]
         });
-        assert_eq!(translate::openai_to_claude(&req).unwrap()["tool_choice"], json!({"type": "none"}));
+        assert_eq!(translate::openai_to_claude(req).unwrap()["tool_choice"], json!({"type": "none"}));
     }
 
     #[test]
@@ -674,7 +674,7 @@ mod tests {
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}}
             ]}]
         });
-        let out = translate::openai_to_claude(&req).unwrap();
+        let out = translate::openai_to_claude(req).unwrap();
         let blocks = out["messages"][0]["content"].as_array().unwrap();
         assert_eq!(blocks[1]["source"]["media_type"], json!("image/png"));
         assert_eq!(blocks[1]["source"]["data"], json!("AAA"));
@@ -688,7 +688,7 @@ mod tests {
                 {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}
             ]}]
         });
-        assert!(translate::openai_to_claude(&req).is_err());
+        assert!(translate::openai_to_claude(req).is_err());
     }
 
     #[test]
@@ -772,12 +772,23 @@ mod tests {
         assert_eq!(chunks[0]["choices"][0]["delta"]["reasoning_content"], json!("plan"));
     }
 
+    #[test]
+    fn a_utf8_character_split_across_chunks_survives() {
+        let mut st = state();
+        let mut out = String::new();
+        let line = "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"あ\"}}\n\n";
+        let cut = line.find('あ').unwrap() + 1;
+        server::feed(&mut st, &line.as_bytes()[..cut], &mut out);
+        server::feed(&mut st, &line.as_bytes()[cut..], &mut out);
+        assert_eq!(parse(&out)[0]["choices"][0]["delta"]["content"], json!("あ"));
+    }
+
     fn state() -> server::SseState {
         server::SseState {
             id: "chatcmpl-x".into(),
             created: 0,
             model: "m".into(),
-            buf: String::new(),
+            buf: Vec::new(),
             usage: None,
             tool_count: 0,
             tool_by_block: std::collections::HashMap::new(),
@@ -1059,7 +1070,7 @@ mod tests {
     #[test]
     fn caller_metadata_is_not_forwarded() {
         let req = json!({"model": "m", "metadata": {"foo": 1}, "messages": [{"role": "user", "content": "x"}]});
-        let out = translate::openai_to_claude(&req).unwrap();
+        let out = translate::openai_to_claude(req).unwrap();
         assert!(out.get("metadata").is_none());
     }
 
@@ -1070,7 +1081,7 @@ mod tests {
             "model": "m",
             "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]}]
         });
-        let e = translate::openai_to_claude(&req).unwrap_err();
+        let e = translate::openai_to_claude(req).unwrap_err();
         assert!(e.starts_with("unsupported image_url: "), "{}", e);
     }
 
@@ -1079,7 +1090,7 @@ mod tests {
         let msgs = json!([{"role": "user", "content": "x"}]);
         for tools in [json!([{"type": "function"}]), json!([{"function": {"description": "d"}}]), json!("x")] {
             let req = json!({"model": "m", "tools": tools, "messages": msgs});
-            assert!(translate::openai_to_claude(&req).is_err(), "{}", tools);
+            assert!(translate::openai_to_claude(req).is_err(), "{}", tools);
         }
     }
 

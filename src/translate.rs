@@ -1,7 +1,7 @@
 use serde_json::{json, Map, Value};
 
 
-pub fn openai_to_claude(body: &Value) -> Result<Value, String> {
+pub fn openai_to_claude(mut body: Value) -> Result<Value, String> {
     let mut out = Map::new();
     let model = body
         .get("model")
@@ -11,46 +11,45 @@ pub fn openai_to_claude(body: &Value) -> Result<Value, String> {
         .ok_or("missing model")?;
     out.insert("model".into(), json!(model));
 
-    let messages = body
-        .get("messages")
-        .and_then(Value::as_array)
-        .ok_or("missing messages")?;
+    let Some(Value::Array(messages)) = body.get_mut("messages").map(Value::take) else {
+        return Err("missing messages".into());
+    };
 
     let mut system_texts: Vec<String> = Vec::new();
-    if let Some(s) = body.get("system").and_then(Value::as_str) {
-        system_texts.push(s.to_string());
+    if let Some(Value::String(s)) = body.get_mut("system").map(Value::take) {
+        system_texts.push(s);
     }
 
     let mut claude_messages: Vec<Value> = Vec::new();
-    for m in messages {
-        let role = m.get("role").and_then(Value::as_str).unwrap_or("user");
-        match role {
+    for mut m in messages {
+        let content = m.get_mut("content").map(Value::take);
+        match m.get("role").and_then(Value::as_str).unwrap_or("user") {
             "system" => {
-                if let Some(t) = content_text(m.get("content")) {
+                if let Some(t) = content_text(content) {
                     system_texts.push(t);
                 }
             }
             "user" => {
-                let blocks = convert_content(m.get("content"))?;
+                let blocks = convert_content(content)?;
                 if blocks.is_empty() {
                     continue;
                 }
                 push_msg(&mut claude_messages, "user", blocks);
             }
             "assistant" => {
-                let mut blocks = convert_content(m.get("content"))?;
-                if let Some(calls) = m.get("tool_calls").and_then(Value::as_array) {
+                let mut blocks = convert_content(content)?;
+                if let Some(Value::Array(calls)) = m.get_mut("tool_calls").map(Value::take) {
                     for c in calls {
-                        let f = c.get("function").cloned().unwrap_or(Value::Null);
+                        let f = c.get("function");
                         let args = f
-                            .get("arguments")
+                            .and_then(|f| f.get("arguments"))
                             .and_then(Value::as_str)
                             .and_then(|s| serde_json::from_str::<Value>(s).ok())
                             .unwrap_or_else(|| json!({}));
                         blocks.push(json!({
                             "type": "tool_use",
                             "id": c.get("id").and_then(Value::as_str).unwrap_or_default(),
-                            "name": mcp_name_out(f.get("name").and_then(Value::as_str).unwrap_or_default()),
+                            "name": mcp_name_out(f.and_then(|f| f.get("name")).and_then(Value::as_str).unwrap_or_default()),
                             "input": args,
                         }));
                     }
@@ -64,7 +63,7 @@ pub fn openai_to_claude(body: &Value) -> Result<Value, String> {
                 let block = json!({
                     "type": "tool_result",
                     "tool_use_id": m.get("tool_call_id").and_then(Value::as_str).unwrap_or_default(),
-                    "content": content_text(m.get("content")).unwrap_or_default(),
+                    "content": content_text(content).unwrap_or_default(),
                 });
                 match claude_messages.last_mut() {
                     Some(last)
@@ -92,15 +91,15 @@ pub fn openai_to_claude(body: &Value) -> Result<Value, String> {
     if let Some(s) = body.get("stream").and_then(Value::as_bool) {
         out.insert("stream".into(), json!(s));
     }
-    if let Some(t) = convert_tools(body.get("tools"))? {
+    if let Some(t) = convert_tools(body.get_mut("tools").map(Value::take))? {
         out.insert("tools".into(), t);
     }
     if let Some(tc) = convert_tool_choice(body.get("tool_choice")) {
         out.insert("tool_choice".into(), tc);
     }
     for k in ["temperature", "top_p", "top_k", "stop_sequences"] {
-        if let Some(v) = body.get(k) {
-            out.insert(k.to_string(), v.clone());
+        if let Some(v) = body.get_mut(k).map(Value::take) {
+            out.insert(k.to_string(), v);
         }
     }
     Ok(Value::Object(out))
@@ -118,13 +117,16 @@ fn push_msg(list: &mut Vec<Value>, role: &str, blocks: Vec<Value>) {
     list.push(json!({ "role": role, "content": blocks }));
 }
 
-fn content_text(v: Option<&Value>) -> Option<String> {
+fn content_text(v: Option<Value>) -> Option<String> {
     match v? {
-        Value::String(s) => Some(s.clone()),
+        Value::String(s) => Some(s),
         Value::Array(items) => {
             let joined: Vec<String> = items
-                .iter()
-                .filter_map(|i| i.get("text").and_then(Value::as_str).map(str::to_string))
+                .into_iter()
+                .filter_map(|mut i| match i.get_mut("text").map(Value::take) {
+                    Some(Value::String(t)) => Some(t),
+                    _ => None,
+                })
                 .collect();
             if joined.is_empty() {
                 None
@@ -136,20 +138,19 @@ fn content_text(v: Option<&Value>) -> Option<String> {
     }
 }
 
-fn convert_content(v: Option<&Value>) -> Result<Vec<Value>, String> {
+fn convert_content(v: Option<Value>) -> Result<Vec<Value>, String> {
     let mut out = Vec::new();
     match v {
-        None => {}
         Some(Value::String(s)) => {
             if !s.is_empty() {
                 out.push(json!({ "type": "text", "text": s }));
             }
         }
         Some(Value::Array(items)) => {
-            for item in items {
+            for mut item in items {
                 match item.get("type").and_then(Value::as_str) {
                     Some("text") => {
-                        if let Some(t) = item.get("text").and_then(Value::as_str) {
+                        if let Some(t @ Value::String(_)) = item.get_mut("text").map(Value::take) {
                             out.push(json!({ "type": "text", "text": t }));
                         }
                     }
@@ -205,27 +206,29 @@ pub fn mcp_name_in(name: &str) -> String {
     }
 }
 
-fn convert_tools(v: Option<&Value>) -> Result<Option<Value>, String> {
-    let Some(v) = v.filter(|v| !v.is_null()) else {
-        return Ok(None);
+fn convert_tools(v: Option<Value>) -> Result<Option<Value>, String> {
+    let arr = match v {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Array(a)) => a,
+        Some(_) => return Err("tools must be an array".into()),
     };
-    let arr = v.as_array().ok_or("tools must be an array")?;
     let out = arr
-        .iter()
+        .into_iter()
         .enumerate()
-        .map(|(i, t)| {
+        .map(|(i, mut t)| {
             let f = t
-                .get("function")
+                .get_mut("function")
                 .ok_or_else(|| format!("tools[{}]: missing function", i))?;
             let name = f
                 .get("name")
                 .and_then(Value::as_str)
                 .filter(|n| !n.is_empty())
                 .ok_or_else(|| format!("tools[{}]: missing function.name", i))?;
+            let name = mcp_name_out(name);
             Ok(json!({
-                "name": mcp_name_out(name),
-                "description": f.get("description").cloned().unwrap_or(json!("")),
-                "input_schema": f.get("parameters").cloned().unwrap_or(json!({
+                "name": name,
+                "description": f.get_mut("description").map(Value::take).unwrap_or(json!("")),
+                "input_schema": f.get_mut("parameters").map(Value::take).unwrap_or(json!({
                     "type": "object", "properties": {}
                 })),
             }))
@@ -296,7 +299,7 @@ pub fn claude_to_openai(claude: &Value, id: &str, created: i64) -> Value {
     if !tool_calls.is_empty() {
         msg.as_object_mut()
             .unwrap()
-            .insert("tool_calls".into(), Value::Array(tool_calls.clone()));
+            .insert("tool_calls".into(), Value::Array(tool_calls));
     }
     json!({
         "id": id,

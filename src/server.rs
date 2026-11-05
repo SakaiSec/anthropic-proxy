@@ -17,17 +17,18 @@ context-management-2025-06-27,prompt-caching-scope-2026-01-05,extended-cache-ttl
 pub async fn chat_completions(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
-    body: String,
+    body: axum::body::Bytes,
 ) -> Response {
-    let parsed: Value = match serde_json::from_str(&body) {
+    let parsed: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return err(400, json!({ "error": { "message": e.to_string(), "type": "invalid_request_error" } })),
     };
-    let claude = match translate::openai_to_claude(&parsed) {
+    drop(body);
+    let streaming = parsed.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let claude = match translate::openai_to_claude(parsed) {
         Ok(v) => v,
         Err(e) => return err(400, json!({ "error": { "message": e, "type": "invalid_request_error" } })),
     };
-    let streaming = parsed.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let model = claude.get("model").and_then(Value::as_str).unwrap_or_default().to_string();
     let id = format!("chatcmpl-{}", crate::rand_id());
     let created = now();
@@ -218,13 +219,36 @@ pub struct SseState {
     pub id: String,
     pub created: i64,
     pub model: String,
-    pub buf: String,
+    pub buf: Vec<u8>,
     pub usage: Option<Value>,
     pub tool_count: usize,
     pub tool_by_block: HashMap<usize, usize>,
     pub stop: Option<String>,
     pub done: bool,
     pub finished: bool,
+}
+
+/// Buffers raw bytes so a UTF-8 character split across network chunks is decoded whole.
+pub fn feed(st: &mut SseState, bytes: &[u8], out: &mut String) {
+    let mut buf = std::mem::take(&mut st.buf);
+    buf.extend_from_slice(bytes);
+    let mut start = 0;
+    while let Some(len) = buf[start..].iter().position(|&b| b == b'\n') {
+        let line = String::from_utf8_lossy(&buf[start..start + len]);
+        start += len + 1;
+        let Some(raw) = line.strip_prefix("data:") else { continue };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        if raw == "[DONE]" {
+            st.done = true;
+            break;
+        }
+        handle_event(st, raw, out);
+    }
+    buf.drain(..start);
+    st.buf = buf;
 }
 
 pub fn handle_event(st: &mut SseState, raw: &str, out: &mut String) {
@@ -238,7 +262,7 @@ pub fn handle_event(st: &mut SseState, raw: &str, out: &mut String) {
         }
         Some("content_block_start") => {
             let idx = ev.get("index").and_then(Value::as_i64).unwrap_or(0) as usize;
-            let block = ev.get("content_block").cloned().unwrap_or(Value::Null);
+            let block = ev.get("content_block").unwrap_or(&Value::Null);
             match block.get("type").and_then(Value::as_str) {
                 Some("text") => {
                     let t = block.get("text").and_then(Value::as_str).unwrap_or("");
@@ -272,7 +296,7 @@ pub fn handle_event(st: &mut SseState, raw: &str, out: &mut String) {
         }
         Some("content_block_delta") => {
             let idx = ev.get("index").and_then(Value::as_i64).unwrap_or(0) as usize;
-            let d = ev.get("delta").cloned().unwrap_or(Value::Null);
+            let d = ev.get("delta").unwrap_or(&Value::Null);
             match d.get("type").and_then(Value::as_str) {
                 Some("text_delta") => {
                     let t = d.get("text").and_then(Value::as_str).unwrap_or("");
@@ -325,10 +349,10 @@ pub fn handle_event(st: &mut SseState, raw: &str, out: &mut String) {
 fn stream_response(upstream: wreq::Response, id: String, created: i64, model: String) -> Response {
     let stream = async_stream::stream! {
         let mut st = SseState {
-            id: id.clone(),
+            id,
             created,
-            model: model.clone(),
-            buf: String::new(),
+            model,
+            buf: Vec::new(),
             usage: None,
             tool_count: 0,
             tool_by_block: HashMap::new(),
@@ -347,21 +371,8 @@ fn stream_response(upstream: wreq::Response, id: String, created: i64, model: St
                     break;
                 }
             };
-            st.buf.push_str(&String::from_utf8_lossy(&bytes));
             let mut out = String::new();
-            while let Some(pos) = st.buf.find('\n') {
-                let line: String = st.buf.drain(..=pos).collect();
-                let Some(raw) = line.strip_prefix("data:") else { continue };
-                let raw = raw.trim();
-                if raw.is_empty() {
-                    continue;
-                }
-                if raw == "[DONE]" {
-                    st.done = true;
-                    break;
-                }
-                handle_event(&mut st, raw, &mut out);
-            }
+            feed(&mut st, &bytes, &mut out);
             if !out.is_empty() {
                 yield Ok::<_, std::io::Error>(axum::body::Bytes::from(out));
             }
@@ -427,12 +438,15 @@ fn err(code: u16, body: Value) -> Response {
 pub fn router(ctx: Ctx) -> axum::Router {
     axum::Router::new()
         .route("/v1/chat/completions", axum::routing::post(chat_completions))
+        // axum's 2MB default rejects long 1M-context conversations; upstream enforces its own limit.
+        .layer(axum::extract::DefaultBodyLimit::disable())
         .with_state(ctx)
 }
 
 pub fn init(ctx: Ctx) {
     let app = router(ctx);
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    // One local client and I/O-bound work: a worker per core is idle weight.
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(crate::ADDR).await.unwrap();
         eprintln!("listening on {}", crate::ADDR);
