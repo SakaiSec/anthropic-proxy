@@ -347,25 +347,10 @@ fn stamp_current_date(claude: &mut Value) {
     }
 }
 
+/// Date only: the reminder is in the first user turn, so finer granularity breaks the cache.
 fn local_date() -> String {
-    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let secs = crate::now();
-    let days = secs.div_euclid(86_400);
-    let tod = secs.rem_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
-    let weekday = (days + 4).rem_euclid(7) as usize;
-    format!(
-        "{} {}, {:02} {} at {:02}:{:02} UTC",
-        DAYS[weekday],
-        MONTHS[(m - 1) as usize],
-        d,
-        y,
-        tod / 3600,
-        (tod % 3600) / 60
-    )
+    let (y, m, d) = civil_from_days(crate::now().div_euclid(86_400));
+    format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
@@ -472,11 +457,11 @@ mod tests {
         assert_eq!(out["messages"].as_array().unwrap().len(), 1);
         assert_eq!(out["messages"][0]["role"], json!("user"));
         assert_eq!(out["messages"][0]["content"][0]["text"], json!("hi"));
-        assert_eq!(out["max_tokens"], json!(4096));
+        assert!(out.get("max_tokens").is_none(), "left for the server to fill from the Models API");
     }
 
     #[test]
-    fn cache_breakpoint_lands_on_the_stable_prefix() {
+    fn cache_breakpoint_lands_on_the_newest_turn() {
         let req = json!({
             "model": "m",
             "messages": [
@@ -489,8 +474,8 @@ mod tests {
         let msgs = out["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 3);
         assert!(msgs[0]["content"][0].get("cache_control").is_none());
-        assert_eq!(msgs[1]["content"][0]["cache_control"], crate::cache_breakpoint());
-        assert!(msgs[2]["content"][0].get("cache_control").is_none());
+        assert!(msgs[1]["content"][0].get("cache_control").is_none());
+        assert_eq!(msgs[2]["content"][0]["cache_control"], crate::cache_breakpoint());
     }
 
     #[test]
@@ -529,6 +514,24 @@ mod tests {
             "messages": [{"role": "user", "content": "x"}]
         });
         assert_eq!(translate::openai_to_claude(&req).unwrap()["max_tokens"], json!(100));
+    }
+
+    #[test]
+    fn max_completion_tokens_wins_over_max_tokens() {
+        let req = json!({
+            "model": "m",
+            "max_completion_tokens": 200,
+            "messages": [{"role": "user", "content": "x"}]
+        });
+        assert_eq!(translate::openai_to_claude(&req).unwrap()["max_tokens"], json!(200));
+
+        let both = json!({
+            "model": "m",
+            "max_tokens": 100,
+            "max_completion_tokens": 200,
+            "messages": [{"role": "user", "content": "x"}]
+        });
+        assert_eq!(translate::openai_to_claude(&both).unwrap()["max_tokens"], json!(200));
     }
 
     #[test]
@@ -714,6 +717,22 @@ mod tests {
     }
 
     #[test]
+    fn prompt_tokens_include_cached_input() {
+        let usage = json!({
+            "input_tokens": 3,
+            "cache_creation_input_tokens": 100,
+            "cache_read_input_tokens": 5000,
+            "output_tokens": 7
+        });
+        let out = translate::map_usage(Some(&usage));
+        assert_eq!(out["prompt_tokens"], json!(5103), "OpenAI prompt_tokens counts cached input too");
+        assert_eq!(out["prompt_tokens_details"]["cached_tokens"], json!(5000));
+        assert_eq!(out["prompt_tokens_details"]["cache_write_tokens"], json!(100));
+        assert_eq!(out["completion_tokens"], json!(7));
+        assert_eq!(out["total_tokens"], json!(5110));
+    }
+
+    #[test]
     fn thinking_blocks_are_dropped() {
         let claude = json!({
             "content": [
@@ -848,6 +867,11 @@ mod tests {
             first_user
         );
         assert!(first_user[0]["text"].as_str().unwrap().contains("# currentDate"));
+        assert!(
+            first_user[0]["text"].as_str().unwrap().contains(&format!("Today's date is {}.", local_date())),
+            "date-only so the reminder stays byte-stable all day: {:?}",
+            first_user[0]
+        );
         assert_eq!(first_user[1]["text"], json!("x"));
         let uid: Value = serde_json::from_str(out["metadata"]["user_id"].as_str().unwrap()).unwrap();
         assert_eq!(uid["session_id"], json!("sess-1"));

@@ -5,6 +5,7 @@ use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::translate;
@@ -32,6 +33,13 @@ pub async fn chat_completions(
     let created = now();
 
     let session = session_id(&headers);
+    let mut claude = claude;
+    if claude.get("max_tokens").is_none() {
+        match model_max_tokens(&ctx, &model, &session).await {
+            Ok(n) => claude["max_tokens"] = json!(n),
+            Err(r) => return r,
+        }
+    }
     let payload = cloaked_system(claude, &session, &ctx.creds);
 
     let upstream = match send(&ctx, &payload, &session, streaming).await {
@@ -39,14 +47,8 @@ pub async fn chat_completions(
         Err(e) => return err(502, json!({ "error": { "message": e, "type": "upstream_error" } })),
     };
 
-    let status = StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    if !status.is_success() {
-        let body = match upstream.bytes().await {
-            Ok(b) if !b.is_empty() => b,
-            Ok(_) => upstream_error_body(format!("upstream returned {} with an empty body", status)),
-            Err(e) => upstream_error_body(format!("upstream returned {}; reading its body failed: {}", status, e)),
-        };
-        return (status, [(axum::http::header::CONTENT_TYPE, "application/json")], body).into_response();
+    if !upstream.status().is_success() {
+        return relay_error(upstream).await;
     }
 
     if streaming {
@@ -63,6 +65,16 @@ pub async fn chat_completions(
         };
         json_ok(translate::claude_to_openai(&claude, &id, created))
     }
+}
+
+async fn relay_error(upstream: wreq::Response) -> Response {
+    let status = StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let body = match upstream.bytes().await {
+        Ok(b) if !b.is_empty() => b,
+        Ok(_) => upstream_error_body(format!("upstream returned {} with an empty body", status)),
+        Err(e) => upstream_error_body(format!("upstream returned {}; reading its body failed: {}", status, e)),
+    };
+    (status, [(axum::http::header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
 fn upstream_error_body(message: String) -> axum::body::Bytes {
@@ -88,6 +100,72 @@ fn session_id(headers: &HeaderMap) -> String {
         .unwrap_or_else(crate::rand_id)
 }
 
+/// Never invents a cap: a failed lookup is relayed like any upstream error.
+async fn model_max_tokens(ctx: &Ctx, model: &str, session: &str) -> Result<u64, Response> {
+    static CACHE: OnceLock<Mutex<HashMap<(String, String), u64>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let key = (ctx.upstream.clone(), model.to_string());
+    if let Some(n) = cache.lock().unwrap().get(&key) {
+        return Ok(*n);
+    }
+    let n = fetch_model_max_tokens(ctx, model, session).await?;
+    cache.lock().unwrap().insert(key, n);
+    Ok(n)
+}
+
+async fn fetch_model_max_tokens(ctx: &Ctx, model: &str, session: &str) -> Result<u64, Response> {
+    let bad_gateway = |e: String| err(502, json!({ "error": { "message": e, "type": "upstream_error" } }));
+    let mut token = load_token(&ctx.creds).map_err(bad_gateway)?;
+    if token.is_expiring() {
+        token = refresh_token(ctx, None)
+            .await
+            .map_err(|e| bad_gateway(format!("token expired and refresh failed: {}", e)))?;
+    }
+    let url = format!("{}/v1/models/{}", ctx.upstream, path_segment(model));
+    let rb = http_client().get(&url).header("accept", "application/json");
+    let r = cli_headers(rb, &token.access_token, session)
+        .send()
+        .await
+        .map_err(|e| bad_gateway(e.to_string()))?;
+    if !r.status().is_success() {
+        return Err(relay_error(r).await);
+    }
+    let v: Value = r
+        .json()
+        .await
+        .map_err(|e| upstream_failure(format!("model lookup body is not valid JSON: {}", e)))?;
+    v.get("max_tokens")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| upstream_failure(format!("model lookup for {} has no max_tokens", model)))
+}
+
+fn path_segment(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            _ => format!("%{:02X}", b),
+        })
+        .collect()
+}
+
+fn cli_headers(rb: wreq::RequestBuilder, access_token: &str, session: &str) -> wreq::RequestBuilder {
+    rb.header("authorization", format!("Bearer {}", access_token))
+        .header("anthropic-beta", BETAS)
+        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-dangerous-direct-browser-access", "true")
+        .header("user-agent", crate::CC_USER_AGENT)
+        .header("x-app", "cli")
+        .header("x-stainless-lang", "js")
+        .header("x-stainless-package-version", crate::SDK_VERSION)
+        .header("x-stainless-runtime", "node")
+        .header("x-stainless-runtime-version", crate::NODE_VERSION)
+        .header("x-stainless-os", "MacOS")
+        .header("x-stainless-arch", "arm64")
+        .header("x-stainless-retry-count", "0")
+        .header("x-stainless-timeout", "600")
+        .header("x-claude-code-session-id", session)
+}
+
 async fn send(
     ctx: &Ctx,
     payload: &Value,
@@ -102,25 +180,11 @@ async fn send(
             .map_err(|e| format!("token expired and refresh failed: {}", e))?;
     }
     for attempt in 0..2 {
-        let r = http_client()
+        let rb = http_client()
             .post(&url)
             .header("content-type", "application/json")
-            .header("accept", if streaming { "text/event-stream" } else { "application/json" })
-            .header("authorization", format!("Bearer {}", token.access_token))
-            .header("anthropic-beta", BETAS)
-            .header("anthropic-version", "2023-06-01")
-            .header("anthropic-dangerous-direct-browser-access", "true")
-            .header("user-agent", crate::CC_USER_AGENT)
-            .header("x-app", "cli")
-            .header("x-stainless-lang", "js")
-            .header("x-stainless-package-version", crate::SDK_VERSION)
-            .header("x-stainless-runtime", "node")
-            .header("x-stainless-runtime-version", crate::NODE_VERSION)
-            .header("x-stainless-os", "MacOS")
-            .header("x-stainless-arch", "arm64")
-            .header("x-stainless-retry-count", "0")
-            .header("x-stainless-timeout", "600")
-            .header("x-claude-code-session-id", session)
+            .header("accept", if streaming { "text/event-stream" } else { "application/json" });
+        let r = cli_headers(rb, &token.access_token, session)
             .json(payload)
             .send()
             .await

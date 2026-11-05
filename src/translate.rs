@@ -1,5 +1,6 @@
 use serde_json::{json, Map, Value};
 
+
 pub fn openai_to_claude(body: &Value) -> Result<Value, String> {
     let mut out = Map::new();
     let model = body
@@ -84,10 +85,10 @@ pub fn openai_to_claude(body: &Value) -> Result<Value, String> {
         out.insert("system".into(), json!(system_texts.join("\n\n")));
     }
     out.insert("messages".into(), Value::Array(cache_history(claude_messages)));
-    out.insert(
-        "max_tokens".into(),
-        body.get("max_tokens").cloned().unwrap_or(json!(4096)),
-    );
+    // When absent, the server fills in the model's cap.
+    if let Some(n) = body.get("max_completion_tokens").or_else(|| body.get("max_tokens")) {
+        out.insert("max_tokens".into(), n.clone());
+    }
     if let Some(s) = body.get("stream").and_then(Value::as_bool) {
         out.insert("stream".into(), json!(s));
     }
@@ -305,15 +306,14 @@ pub fn claude_to_openai(claude: &Value, id: &str, created: i64) -> Value {
     })
 }
 
+/// On the newest turn, as Claude Code does; one turn back bills each new turn twice.
 fn cache_history(mut messages: Vec<Value>) -> Vec<Value> {
     if messages.len() < 2 {
         return messages;
     }
-    let newest = messages.pop().unwrap();
-    if let Some(block) = last_block_mut(messages.last_mut().unwrap()) {
+    if let Some(block) = messages.last_mut().and_then(last_block_mut) {
         block.insert("cache_control".into(), crate::cache_breakpoint());
     }
-    messages.push(newest);
     messages
 }
 
@@ -329,11 +329,16 @@ fn last_block_mut(msg: &mut Value) -> Option<&mut Map<String, Value>> {
 
 pub fn map_usage(u: Option<&Value>) -> Value {
     let n = |k: &str| u.and_then(|u| u.get(k)).and_then(Value::as_i64).unwrap_or(0);
+    // Claude's input_tokens excludes cached input; OpenAI's prompt_tokens includes it.
+    let prompt = n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
     json!({
-        "prompt_tokens": n("input_tokens"),
+        "prompt_tokens": prompt,
         "completion_tokens": n("output_tokens"),
-        "total_tokens": n("input_tokens") + n("output_tokens"),
-        "prompt_tokens_details": { "cached_tokens": n("cache_read_input_tokens") },
+        "total_tokens": prompt + n("output_tokens"),
+        "prompt_tokens_details": {
+            "cached_tokens": n("cache_read_input_tokens"),
+            "cache_write_tokens": n("cache_creation_input_tokens"),
+        },
     })
 }
 

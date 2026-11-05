@@ -81,7 +81,8 @@ fn read_request(sock: &mut std::net::TcpStream) -> (String, Vec<String>, Value) 
         .unwrap_or(0);
         if buf.len() >= i + 4 + content_length {
             let lines: Vec<String> = head.lines().map(str::to_string).collect();
-            let body: Value = serde_json::from_slice(&buf[i + 4..i + 4 + content_length]).unwrap();
+            let raw = &buf[i + 4..i + 4 + content_length];
+            let body: Value = if raw.is_empty() { Value::Null } else { serde_json::from_slice(raw).unwrap() };
             return (lines[0].clone(), lines, body);
         }
     }
@@ -133,6 +134,20 @@ fn start_upstream(kind: &'static str, expire_first: bool) -> (String, Receiver<C
                 })
                 .to_string();
                 respond(&mut sock, "200 OK", "application/json", &payload);
+                continue;
+            }
+
+            if request_line.starts_with("GET /v1/models/m ") {
+                respond(&mut sock, "200 OK", "application/json", r#"{"type":"model","id":"m","max_tokens":64000}"#);
+                continue;
+            }
+            if request_line.starts_with("GET /v1/models/") {
+                respond(
+                    &mut sock,
+                    "404 Not Found",
+                    "application/json",
+                    r#"{"type":"error","error":{"type":"not_found_error","message":"model"}}"#,
+                );
                 continue;
             }
 
@@ -323,7 +338,7 @@ fn non_streaming_round_trip() {
         })
     );
     assert_eq!(cap.body["system"].as_array().unwrap().len(), 2, "caller system leaves the system array");
-    assert_eq!(cap.body["max_tokens"], json!(4096));
+    assert_eq!(cap.body["max_tokens"], json!(64000), "taken from GET /v1/models/m");
 
     let msgs = cap.body["messages"].as_array().unwrap();
     assert_eq!(msgs.len(), 2, "caller system rides in messages: {:?}", msgs);
@@ -622,4 +637,28 @@ fn malformed_tool_is_rejected() {
     );
     assert_eq!(status, 400, "body={}", body);
     assert!(body.contains("tools[0]"), "body={}", body);
+}
+
+#[test]
+fn failed_model_lookup_is_relayed_and_never_reaches_messages() {
+    let h = harness("nolimit", "json", false);
+    let (status, body) = post(&h.proxy, &json!({"model":"other","messages":[{"role":"user","content":"x"}]}));
+    assert_eq!(status, 404, "body={}", body);
+    assert!(body.contains("not_found_error"), "upstream error is relayed verbatim: {}", body);
+    assert!(
+        h.seen.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+        "no invented max_tokens: the request must not reach /v1/messages"
+    );
+}
+
+#[test]
+fn caller_output_cap_skips_the_model_lookup() {
+    let h = harness("callercap", "json", false);
+    let (status, body) = post(
+        &h.proxy,
+        &json!({"model":"m","max_completion_tokens":123,"messages":[{"role":"user","content":"x"}]}),
+    );
+    let cap = wait(&h);
+    assert_eq!(status, 200, "body={}", body);
+    assert_eq!(cap.body["max_tokens"], json!(123));
 }

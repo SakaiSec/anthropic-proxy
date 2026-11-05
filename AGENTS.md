@@ -12,6 +12,16 @@ Code OAuth subscription token. Single account, no config file, no management API
 - `cargo run -- login|status|serve` — `serve` is the default when no subcommand is given.
 - No CI, lint, or formatter config exists; `cargo test` is the verification gate.
 
+## Restart after a fix
+
+After a fix passes `cargo test`, restart the running proxy (LaunchAgent `local.anthropic-proxy`):
+
+```sh
+cargo build --release && launchctl kickstart -k gui/$(id -u)/local.anthropic-proxy
+```
+
+The first spawn may fail with `OS_REASON_CODESIGNING`; `KeepAlive` retries it.
+
 ## Layout
 
 - `src/lib.rs` — CLI parsing (`run`), credential storage, Claude Code request cloaking, most unit tests.
@@ -32,7 +42,7 @@ Upstream requires the request to look like the real Claude Code CLI:
 - `cloaked_system()` injects a billing header whose fingerprint is derived from the first user
   message and `CC_VERSION`, prepends the Claude Code system prompt with a 1h cache breakpoint,
   moves a caller `system` prompt into a `role: "system"` message after the first user turn, stamps a
-  current-date reminder, and replaces `metadata` with a device/session `user_id`.
+  current-date reminder (date only, to keep the cache stable), and replaces `metadata` with a device/session `user_id`.
 - `server::send` sends an exact CLI header set: OAuth `Bearer` only (never `x-api-key`),
   `anthropic-beta`, stainless, and user-agent values. `CC_VERSION`, `SDK_VERSION`, `NODE_VERSION`,
   and `CC_USER_AGENT` are pinned to a real Claude Code release; keep them mutually consistent.
@@ -57,3 +67,5 @@ Upstream requires the request to look like the real Claude Code CLI:
 - `mcp_`-prefixed tool names are case-mapped on the way out and restored on the way back.
 - Consecutive same-role messages are merged; caller-supplied `metadata` is discarded.
 - Images must be base64 `data:` URLs; other `image_url` forms are rejected with 400.
+- Without a caller limit, `max_tokens` comes from upstream `GET /v1/models/{id}`; a failed lookup
+  is relayed, never replaced by a made-up default.
