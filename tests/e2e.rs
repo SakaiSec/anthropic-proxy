@@ -138,7 +138,17 @@ fn start_upstream(kind: &'static str, expire_first: bool) -> (String, Receiver<C
             }
 
             if request_line.starts_with("GET /v1/models/m ") {
-                respond(&mut sock, "200 OK", "application/json", r#"{"type":"model","id":"m","max_tokens":64000}"#);
+                let model = json!({
+                    "type": "model",
+                    "id": "m",
+                    "max_tokens": 64000,
+                    "capabilities": {"thinking": {"types": {"adaptive": {"supported": true}}}},
+                });
+                respond(&mut sock, "200 OK", "application/json", &model.to_string());
+                continue;
+            }
+            if request_line.starts_with("GET /v1/models/plain ") {
+                respond(&mut sock, "200 OK", "application/json", r#"{"type":"model","id":"plain","max_tokens":8000}"#);
                 continue;
             }
             if request_line.starts_with("GET /v1/models/") {
@@ -339,6 +349,7 @@ fn non_streaming_round_trip() {
     );
     assert_eq!(cap.body["system"].as_array().unwrap().len(), 2, "caller system leaves the system array");
     assert_eq!(cap.body["max_tokens"], json!(64000), "taken from GET /v1/models/m");
+    assert_eq!(cap.body["thinking"], json!({"type": "adaptive", "display": "summarized"}));
 
     let msgs = cap.body["messages"].as_array().unwrap();
     assert_eq!(msgs.len(), 2, "caller system rides in messages: {:?}", msgs);
@@ -661,4 +672,14 @@ fn caller_output_cap_skips_the_model_lookup() {
     let cap = wait(&h);
     assert_eq!(status, 200, "body={}", body);
     assert_eq!(cap.body["max_tokens"], json!(123));
+}
+
+#[test]
+fn thinking_is_left_off_for_models_without_adaptive_support() {
+    let h = harness("plain", "json", false);
+    let (status, body) = post(&h.proxy, &json!({"model":"plain","messages":[{"role":"user","content":"x"}]}));
+    let cap = wait(&h);
+    assert_eq!(status, 200, "body={}", body);
+    assert_eq!(cap.body["max_tokens"], json!(8000));
+    assert!(cap.body.get("thinking").is_none(), "{:?}", cap.body["thinking"]);
 }

@@ -33,12 +33,17 @@ pub async fn chat_completions(
     let created = now();
 
     let session = session_id(&headers);
+    let info = match model_info(&ctx, &model, &session).await {
+        Ok(i) => i,
+        Err(r) => return r,
+    };
     let mut claude = claude;
     if claude.get("max_tokens").is_none() {
-        match model_max_tokens(&ctx, &model, &session).await {
-            Ok(n) => claude["max_tokens"] = json!(n),
-            Err(r) => return r,
-        }
+        claude["max_tokens"] = json!(info.max_tokens);
+    }
+    // The default display is "omitted", which streams thinking blocks with empty text.
+    if info.adaptive_thinking {
+        claude["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
     }
     let payload = cloaked_system(claude, &session, &ctx.creds);
 
@@ -100,20 +105,26 @@ fn session_id(headers: &HeaderMap) -> String {
         .unwrap_or_else(crate::rand_id)
 }
 
-/// Never invents a cap: a failed lookup is relayed like any upstream error.
-async fn model_max_tokens(ctx: &Ctx, model: &str, session: &str) -> Result<u64, Response> {
-    static CACHE: OnceLock<Mutex<HashMap<(String, String), u64>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(Default::default);
-    let key = (ctx.upstream.clone(), model.to_string());
-    if let Some(n) = cache.lock().unwrap().get(&key) {
-        return Ok(*n);
-    }
-    let n = fetch_model_max_tokens(ctx, model, session).await?;
-    cache.lock().unwrap().insert(key, n);
-    Ok(n)
+#[derive(Clone, Copy)]
+struct ModelInfo {
+    max_tokens: u64,
+    adaptive_thinking: bool,
 }
 
-async fn fetch_model_max_tokens(ctx: &Ctx, model: &str, session: &str) -> Result<u64, Response> {
+/// Never invents values: a failed lookup is relayed like any upstream error.
+async fn model_info(ctx: &Ctx, model: &str, session: &str) -> Result<ModelInfo, Response> {
+    static CACHE: OnceLock<Mutex<HashMap<(String, String), ModelInfo>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let key = (ctx.upstream.clone(), model.to_string());
+    if let Some(i) = cache.lock().unwrap().get(&key) {
+        return Ok(*i);
+    }
+    let i = fetch_model_info(ctx, model, session).await?;
+    cache.lock().unwrap().insert(key, i);
+    Ok(i)
+}
+
+async fn fetch_model_info(ctx: &Ctx, model: &str, session: &str) -> Result<ModelInfo, Response> {
     let bad_gateway = |e: String| err(502, json!({ "error": { "message": e, "type": "upstream_error" } }));
     let mut token = load_token(&ctx.creds).map_err(bad_gateway)?;
     if token.is_expiring() {
@@ -134,9 +145,12 @@ async fn fetch_model_max_tokens(ctx: &Ctx, model: &str, session: &str) -> Result
         .json()
         .await
         .map_err(|e| upstream_failure(format!("model lookup body is not valid JSON: {}", e)))?;
-    v.get("max_tokens")
+    let max_tokens = v
+        .get("max_tokens")
         .and_then(Value::as_u64)
-        .ok_or_else(|| upstream_failure(format!("model lookup for {} has no max_tokens", model)))
+        .ok_or_else(|| upstream_failure(format!("model lookup for {} has no max_tokens", model)))?;
+    let adaptive_thinking = v.pointer("/capabilities/thinking/types/adaptive/supported") == Some(&json!(true));
+    Ok(ModelInfo { max_tokens, adaptive_thinking })
 }
 
 fn path_segment(s: &str) -> String {
@@ -265,6 +279,14 @@ pub fn handle_event(st: &mut SseState, raw: &str, out: &mut String) {
                     out.push_str(&sse(&translate::chunk(
                         &st.id, st.created, &st.model, json!({ "content": t }), None, None,
                     )));
+                }
+                Some("thinking_delta") => {
+                    let t = d.get("thinking").and_then(Value::as_str).unwrap_or("");
+                    if !t.is_empty() {
+                        out.push_str(&sse(&translate::chunk(
+                            &st.id, st.created, &st.model, json!({ "reasoning_content": t }), None, None,
+                        )));
+                    }
                 }
                 Some("input_json_delta") => {
                     let Some(tool) = st.tool_by_block.get(&idx).copied() else { return };

@@ -261,12 +261,16 @@ pub fn finish_reason(stop: Option<&str>) -> &'static str {
 
 pub fn claude_to_openai(claude: &Value, id: &str, created: i64) -> Value {
     let mut text = String::new();
+    let mut reasoning = String::new();
     let mut tool_calls: Vec<Value> = Vec::new();
     if let Some(blocks) = claude.get("content").and_then(Value::as_array) {
         for b in blocks {
             match b.get("type").and_then(Value::as_str) {
                 Some("text") => {
                     text.push_str(b.get("text").and_then(Value::as_str).unwrap_or_default())
+                }
+                Some("thinking") => {
+                    reasoning.push_str(b.get("thinking").and_then(Value::as_str).unwrap_or_default())
                 }
                 Some("tool_use") => tool_calls.push(json!({
                     "index": tool_calls.len(),
@@ -286,6 +290,9 @@ pub fn claude_to_openai(claude: &Value, id: &str, created: i64) -> Value {
         }
     }
     let mut msg = json!({ "role": "assistant", "content": text });
+    if !reasoning.is_empty() {
+        msg["reasoning_content"] = json!(reasoning);
+    }
     if !tool_calls.is_empty() {
         msg.as_object_mut()
             .unwrap()

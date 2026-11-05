@@ -733,16 +733,17 @@ mod tests {
     }
 
     #[test]
-    fn thinking_blocks_are_dropped() {
+    fn thinking_becomes_reasoning_content() {
         let claude = json!({
             "content": [
-                {"type": "thinking", "thinking": "secret"},
+                {"type": "thinking", "thinking": "summary", "signature": "sig"},
                 {"type": "text", "text": "answer"}
             ],
             "stop_reason": "end_turn"
         });
         let out = translate::claude_to_openai(&claude, "id", 0);
         assert_eq!(out["choices"][0]["message"]["content"], json!("answer"));
+        assert_eq!(out["choices"][0]["message"]["reasoning_content"], json!("summary"));
         assert_eq!(out["choices"][0]["finish_reason"], json!("stop"));
     }
 
@@ -753,6 +754,22 @@ mod tests {
         assert_eq!(translate::finish_reason(Some("tool_use")), "tool_calls");
         assert_eq!(translate::finish_reason(Some("stop_sequence")), "stop");
         assert_eq!(translate::finish_reason(None), "stop");
+    }
+
+    #[test]
+    fn thinking_deltas_stream_as_reasoning_content() {
+        let mut st = state();
+        let mut out = String::new();
+        for e in [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"plan"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}"#,
+        ] {
+            server::handle_event(&mut st, e, &mut out);
+        }
+        let chunks = parse(&out);
+        assert_eq!(chunks.len(), 1, "only the thinking text is emitted: {:?}", chunks);
+        assert_eq!(chunks[0]["choices"][0]["delta"]["reasoning_content"], json!("plan"));
     }
 
     fn state() -> server::SseState {

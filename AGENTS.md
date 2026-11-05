@@ -67,5 +67,7 @@ Upstream requires the request to look like the real Claude Code CLI:
 - `mcp_`-prefixed tool names are case-mapped on the way out and restored on the way back.
 - Consecutive same-role messages are merged; caller-supplied `metadata` is discarded.
 - Images must be base64 `data:` URLs; other `image_url` forms are rejected with 400.
-- Without a caller limit, `max_tokens` comes from upstream `GET /v1/models/{id}`; a failed lookup
-  is relayed, never replaced by a made-up default.
+- Every request looks up upstream `GET /v1/models/{id}` (cached); a failed lookup is relayed, never
+  replaced by made-up defaults. It supplies `max_tokens` when the caller sends no limit, and
+  `thinking: {type: "adaptive", display: "summarized"}` for models that support adaptive thinking.
+- Thinking text is returned as `reasoning_content`; thinking blocks are never replayed upstream.
