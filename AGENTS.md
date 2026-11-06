@@ -71,5 +71,6 @@ Upstream requires the request to look like the real Claude Code CLI:
   replaced by made-up defaults. It supplies `max_tokens` when the caller sends no limit, and
   `thinking: {type: "adaptive", display: "summarized"}` for models that support adaptive thinking.
 - Thinking text is returned as `reasoning_content`; thinking blocks are never replayed upstream.
+- `stop_reason: "refusal"` maps to `finish_reason: "content_filter"`, never a silent `"stop"`.
 - No proxy-side body size limit (axum's 2MB default is disabled); upstream enforces its own.
 - SSE is decoded per line from raw bytes, so a UTF-8 character split across chunks survives.

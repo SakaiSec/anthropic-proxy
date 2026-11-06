@@ -753,6 +753,7 @@ mod tests {
         assert_eq!(translate::finish_reason(Some("max_tokens")), "length");
         assert_eq!(translate::finish_reason(Some("tool_use")), "tool_calls");
         assert_eq!(translate::finish_reason(Some("stop_sequence")), "stop");
+        assert_eq!(translate::finish_reason(Some("refusal")), "content_filter");
         assert_eq!(translate::finish_reason(None), "stop");
     }
 

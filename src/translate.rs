@@ -257,6 +257,8 @@ pub fn finish_reason(stop: Option<&str>) -> &'static str {
     match stop {
         Some("max_tokens") => "length",
         Some("tool_use") => "tool_calls",
+        // A safety-classifier decline: HTTP 200, often with empty content.
+        Some("refusal") => "content_filter",
         Some("stop_sequence") | Some("end_turn") | None => "stop",
         _ => "stop",
     }
